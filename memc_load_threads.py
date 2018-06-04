@@ -15,7 +15,7 @@ import appsinstalled_pb2
 # pip install python-memcached
 import memcache
 
-from multiprocessing import cpu_count, Pool as ThreadPool
+from multiprocessing import cpu_count
 from Queue import Queue, Empty
 import threading
 import time
@@ -70,16 +70,15 @@ def parse_appsinstalled(line):
     return AppsInstalled(dev_type, dev_id, lat, lon, apps)
 
 
-def worker(queue, devices, dry, r_lock, w_lock, s_event, statuses):
+def worker(queue, devices, dry, lock, s_event):
     """
     Воркер для обработки строк
 
     :param Queue.Queue queue: очередь со строками
     :param dict[str] devices: словать устройств и адресов
-    :param threading.RLock r_lock: блокировщик чтения
-    :param threading.RLock w_lock: блокировщих записи
+    :param bool dry: Подробный или краткий режим вывода
+    :param threading.RLock lock: блокировщих записи
     :param threading.Event s_event: событи остановки работы потока
-    :param dict[str] statuses: статусы обработки строк
     :return:
     """
     while True:
@@ -87,34 +86,45 @@ def worker(queue, devices, dry, r_lock, w_lock, s_event, statuses):
             logging.info('Exit from thread')
             break
         try:
-            next_line = queue.get_nowait()
+            next_file = queue.get_nowait()
         except Empty as e:
             pass
             continue
         else:
+            fd = gzip.open(next_file)
+            i = 0
+            processed = errors = 0
             try:
-                appsinstalled = parse_appsinstalled(next_line)
-                if not appsinstalled:
-                    with r_lock:
-                        statuses['errors'] += 1
-                    continue
-
-                memc_addr = devices.get(appsinstalled.dev_type)
-                if not memc_addr:
-                    with r_lock:
-                        statuses['errors'] += 1
+                for line in fd:
+                    i += 1
+                    line = line.strip()
+                    if not line:
+                        continue
+                    appsinstalled = parse_appsinstalled(line)
+                    if not appsinstalled:
+                        errors += 1
+                        continue
+                    memc_addr = devices.get(appsinstalled.dev_type)
+                    if not memc_addr:
+                        errors += 1
                         logging.error("Unknow device type: %s" % appsinstalled.dev_type)
                         continue
-
-                with w_lock:
+                    # with lock:
                     ok = insert_appsinstalled(memc_addr, appsinstalled, dry)
-
-                with r_lock:
                     if ok:
-                        statuses['processed'] += 1
+                        processed += 1
                     else:
-                        statuses['errors'] += 1
+                        errors += 1
+                    if i >= 10:
+                        break
             finally:
+                err_rate = float(errors) / (processed or 1)
+                if err_rate < NORMAL_ERR_RATE:
+                    logging.info("Acceptable error rate (%s). Successfull load" % err_rate)
+                else:
+                    logging.error("High error rate (%s > %s). Failed load" % (err_rate, NORMAL_ERR_RATE))
+                fd.close()
+                dot_rename(next_file)
                 queue.task_done()
 
 
@@ -126,50 +136,24 @@ def main(options):
         "dvid": options.dvid,
     }
 
-    read_lock = threading.RLock()
-    write_lock = threading.RLock()
+    lock = threading.RLock()
     stop_event = threading.Event()
     queue = Queue()
     thread_pool = []
 
-    statuses = dict(
-        processed=0,
-        errors=0
-    )
-
     for n in range(cpu_count()):
         thread = threading.Thread(
             target=worker,
-            args=(queue, device_memc, options.dry, read_lock, write_lock, stop_event, statuses)
+            args=(queue, device_memc, options.dry, lock, stop_event)
         )
         thread.setDaemon(True)
         thread.start()
         thread_pool.append(thread)
 
     for fn in glob.iglob(options.pattern):
-        fd = gzip.open(fn)
-        statuses['processed'] = 0
-        statuses['errors'] = 0
-        i = 0
-        for line in fd:
-            i += 1
-            line = line.strip()
-            if not line:
-                continue
-            queue.put(line)
-            if i >= 50000:
-                break
+        queue.put(fn)
 
-        queue.join()
-
-        err_rate = float(statuses['errors']) / statuses['processed']
-        if err_rate < NORMAL_ERR_RATE:
-            logging.info("Acceptable error rate (%s). Successfull load" % err_rate)
-        else:
-            logging.error("High error rate (%s > %s). Failed load" % (err_rate, NORMAL_ERR_RATE))
-        fd.close()
-        # dot_rename(fn)
-
+    queue.join()
     stop_event.set()
 
     for thread in thread_pool:

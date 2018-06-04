@@ -95,7 +95,8 @@ def main(options):
                 processed += 1
             else:
                 errors += 1
-            if i >= 50000:
+            if i >= 10:
+                logging.info(i)
                 break
         if not processed:
             fd.close()
