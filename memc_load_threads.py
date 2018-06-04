@@ -27,7 +27,7 @@ AppsInstalled = collections.namedtuple("AppsInstalled", ["dev_type", "dev_id", "
 def dot_rename(path):
     head, fn = os.path.split(path)
     # atomic in most cases
-    # os.rename(path, os.path.join(head, "." + fn))
+    os.rename(path, os.path.join(head, "." + fn))
 
 
 def insert_appsinstalled(memc_addr, appsinstalled, dry_run=False):
@@ -70,14 +70,13 @@ def parse_appsinstalled(line):
     return AppsInstalled(dev_type, dev_id, lat, lon, apps)
 
 
-def worker(queue, devices, dry, lock, s_event):
+def worker(queue, devices, dry, s_event):
     """
     Воркер для обработки строк
 
     :param Queue.Queue queue: очередь со строками
     :param dict[str] devices: словать устройств и адресов
     :param bool dry: Подробный или краткий режим вывода
-    :param threading.RLock lock: блокировщих записи
     :param threading.Event s_event: событи остановки работы потока
     :return:
     """
@@ -92,11 +91,9 @@ def worker(queue, devices, dry, lock, s_event):
             continue
         else:
             fd = gzip.open(next_file)
-            i = 0
             processed = errors = 0
             try:
                 for line in fd:
-                    i += 1
                     line = line.strip()
                     if not line:
                         continue
@@ -109,20 +106,19 @@ def worker(queue, devices, dry, lock, s_event):
                         errors += 1
                         logging.error("Unknow device type: %s" % appsinstalled.dev_type)
                         continue
-                    # with lock:
                     ok = insert_appsinstalled(memc_addr, appsinstalled, dry)
                     if ok:
                         processed += 1
                     else:
                         errors += 1
-                    if i >= 10:
-                        break
-            finally:
+                # Избавился от проверки precessed == 0.
+                # Если processed == 0, то err_rate = float(errors) / 1 -> все строки ушли в ошибки
                 err_rate = float(errors) / (processed or 1)
                 if err_rate < NORMAL_ERR_RATE:
                     logging.info("Acceptable error rate (%s). Successfull load" % err_rate)
                 else:
                     logging.error("High error rate (%s > %s). Failed load" % (err_rate, NORMAL_ERR_RATE))
+            finally:
                 fd.close()
                 dot_rename(next_file)
                 queue.task_done()

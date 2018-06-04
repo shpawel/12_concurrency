@@ -21,7 +21,7 @@ AppsInstalled = collections.namedtuple("AppsInstalled", ["dev_type", "dev_id", "
 def dot_rename(path):
     head, fn = os.path.split(path)
     # atomic in most cases
-    # os.rename(path, os.path.join(head, "." + fn))
+    os.rename(path, os.path.join(head, "." + fn))
 
 
 def insert_appsinstalled(memc_addr, appsinstalled, dry_run=False):
@@ -75,9 +75,7 @@ def main(options):
         processed = errors = 0
         logging.info('Processing %s' % fn)
         fd = gzip.open(fn)
-        i = 0
         for line in fd:
-            i += 1
             line = line.strip()
             if not line:
                 continue
@@ -95,9 +93,6 @@ def main(options):
                 processed += 1
             else:
                 errors += 1
-            if i >= 10:
-                logging.info(i)
-                break
         if not processed:
             fd.close()
             dot_rename(fn)
@@ -147,10 +142,7 @@ if __name__ == '__main__':
 
     logging.info("Memc loader started with options: %s" % opts)
     try:
-        import time  # noqa
-        s = time.time()
         main(opts)
-        logging.info('Time %s', time.time() - s)
     except Exception, e:
         logging.exception("Unexpected error: %s" % e)
         sys.exit(1)
