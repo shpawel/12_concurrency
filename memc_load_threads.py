@@ -87,7 +87,7 @@ def worker(queue, devices, dry, s_event):
         try:
             next_file = queue.get_nowait()
         except Empty as e:
-            pass
+            logging.exception(e)
             continue
         else:
             fd = gzip.open(next_file)
@@ -140,7 +140,7 @@ def main(options):
     for n in range(cpu_count()):
         thread = threading.Thread(
             target=worker,
-            args=(queue, device_memc, options.dry, lock, stop_event)
+            args=(queue, device_memc, options.dry, stop_event)
         )
         thread.setDaemon(True)
         thread.start()
